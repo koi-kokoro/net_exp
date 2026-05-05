@@ -1,0 +1,28 @@
+# 忽略 Python 缓存和环境
+__pycache__/
+.venv/
+
+# 忽略数据库
+*.db
+
+# 忽略临时文件和文档
+~$*
+*.pptx
+*.docx
+
+# 忽略其他不需要的文件夹
+images/
+templates/
+yolov8/
+
+# 根据需要决定是否忽略其他文件
+*.bat
+*.jpg
+
+SKILL.md
+test_improved_recognition.py
+test_integration.py
+test_jpg.py
+test_ocr_fix.py
+test_ocr.py
+test_yolo_integration.py
