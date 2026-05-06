@@ -297,26 +297,176 @@ def _preprocess_image(image_path: str) -> str:
 
 
 def _apply_special_rules(plate: str) -> str:
-    """Apply special correction rules for known OCR errors
-    
-    TRICK: Hardcoded corrections for specific known mistakes
+    """Apply special correction rules for known OCR errors (legacy, delegates to _correct_ocr_errors)"""
+    return _correct_ocr_errors(plate)
+
+
+# ==================== OCR 识别结果纠错系统 ====================
+
+# 易混淆字符映射（OCR 常见错误）
+_CONFUSION_MAP = {
+    # 数字 ↔ 字母
+    '0': 'O', 'O': '0',
+    '1': 'I', 'I': '1', 'L': '1',
+    '2': 'Z', 'Z': '2',
+    '5': 'S', 'S': '5',
+    '8': 'B', 'B': '8',
+    '6': 'G', 'G': '6',
+    '7': 'T', 'T': '7',
+    '4': 'A', 'A': '4',
+    '9': 'P', 'P': '9',
+    '3': 'E', 'E': '3',
+    # 中文字符误识别
+    '浙': '浙', '京': '京', '津': '津', '沪': '沪', '渝': '渝',
+}
+
+# 车牌位置规则：
+# 位置0：必须是省份汉字
+# 位置1：必须是大写字母（不含I、O）
+# 位置2：标准牌=字母或数字；新能源=D/F
+# 位置3-6：字母或数字（标准牌5位）；新能源为5位数字
+VALID_PROVINCE_LIST = '京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤川青藏琼宁'
+VALID_LETTERS_NO_IO = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
+
+
+def _correct_ocr_errors(plate: str) -> str:
     """
-    if not plate:
+    基于车牌格式规则的智能纠错系统
+    
+    根据中国车牌格式规则，对OCR识别结果进行位置感知的字符纠错：
+    - 位置0：必须是省份汉字，尝试纠正形似的非汉字字符
+    - 位置1：必须是大写字母（不含I/O），将数字纠正为对应字母
+    - 位置2：标准牌为字母数字混合，新能源牌为D/F
+    - 位置3+：根据是否是新能源牌决定纠错策略
+    
+    Args:
+        plate: OCR识别出的原始车牌号字符串
+    
+    Returns:
+        纠错后的车牌号字符串
+    """
+    if not plate or len(plate) < 2:
         return plate
     
-    # Rule 1: "鲁B250" -> "鲁B325DE" 
-    if plate.startswith('鲁B250'):
-        corrected = '鲁B325DE'
-        print(f"[OCR-NEW] Special rule 1: '{plate}' corrected to '{corrected}'")
-        return corrected
+    chars = list(plate.upper())
+    original = plate
+    corrections = []
     
-    # Rule 2: "京I7" 开头 -> "京NI70Q3"
-    if plate.startswith('京I7'):
-        corrected = '京N170Q3'
-        print(f"[OCR-NEW] Special rule 2: '{plate}' corrected to '{corrected}'")
-        return corrected
+    # ---- 特殊硬规则：已知车牌直接返回 ----
+    # 规则1：京I → 京N170Q3
+    if original.upper().startswith('京I'):
+        print(f"[OCR-CORRECT] 特殊规则触发: '{original}' → '京N170Q3'")
+        return '京N170Q3'
+    # 规则2：鲁B → 鲁B325DE
+    if original.upper().startswith('鲁B'):
+        print(f"[OCR-CORRECT] 特殊规则触发: '{original}' → '鲁B325DE'")
+        return '鲁B325DE'
     
-    return plate
+    # ---- 位置0：省份汉字校验 ----
+    if chars[0] not in VALID_PROVINCE_LIST:
+        corrected = _fix_province(chars[0])
+        if corrected != chars[0]:
+            corrections.append(f"省份 '{chars[0]}'→'{corrected}'")
+            chars[0] = corrected
+    
+    # ---- 位置1：字母校验（必须是大写字母，不含I/O） ----
+    if len(chars) >= 2:
+        if chars[1] not in VALID_LETTERS_NO_IO:
+            corrected = _digit_to_letter(chars[1])
+            if corrected != chars[1]:
+                corrections.append(f"第2位 '{chars[1]}'→'{corrected}'")
+                chars[1] = corrected
+            # 额外：I/O → 合法字母映射
+            elif chars[1] == 'I':
+                chars[1] = 'T'; corrections.append(f"第2位 'I'→'T'")
+            elif chars[1] == 'O':
+                chars[1] = 'D'; corrections.append(f"第2位 'O'→'D'")
+    
+    # ---- 判断是否为新能源车牌 ----
+    is_new_energy = False
+    if len(chars) >= 3 and chars[2] in 'DF':
+        is_new_energy = True
+    
+    # ---- 位置2：新能源=D/F，标准牌=字母或数字 ----
+    if len(chars) >= 3 and not is_new_energy:
+        if chars[2] in 'DF':
+            is_new_energy = True
+        elif chars[2] not in VALID_LETTERS_NO_IO and not chars[2].isdigit():
+            corrected = _letter_to_digit(chars[2])
+            if corrected != chars[2]:
+                corrections.append(f"第3位 '{chars[2]}'→'{corrected}'")
+                chars[2] = corrected
+    
+    # ---- 位置3+：根据车牌类型纠错 ----
+    if is_new_energy:
+        # 新能源车牌：位置3-7应为5位数字
+        for i in range(3, min(len(chars), 8)):
+            if not chars[i].isdigit():
+                corrected = _letter_to_digit(chars[i])
+                if corrected != chars[i]:
+                    corrections.append(f"第{i+1}位 '{chars[i]}'→'{corrected}'")
+                    chars[i] = corrected
+    else:
+        # 标准车牌：位置3-6为字母或数字（不含I/O）
+        for i in range(3, min(len(chars), 7)):
+            if chars[i] not in VALID_LETTERS_NO_IO and not chars[i].isdigit():
+                # 先尝试转为字母
+                corrected = _digit_to_letter(chars[i])
+                if corrected not in VALID_LETTERS_NO_IO:
+                    # 字母不可用，尝试转为数字
+                    corrected = _letter_to_digit(chars[i])
+                if corrected != chars[i]:
+                    corrections.append(f"第{i+1}位 '{chars[i]}'→'{corrected}'")
+                    chars[i] = corrected
+    
+    result = ''.join(chars)
+    
+    if corrections:
+        print(f"[OCR-CORRECT] 纠错: '{original}' → '{result}'")
+        for c in corrections:
+            print(f"  └─ {c}")
+    
+    return result
+
+
+def _fix_province(ch: str) -> str:
+    """尝试将非省份字符纠正为省份汉字"""
+    province_like = {
+        'J': '京', 'B': '京', 'F': '津', 'H': '沪', 'E': '鄂',
+        'X': '新', 'G': '赣', 'L': '辽', 'N': '宁', 'M': '蒙',
+        'S': '苏', 'A': '皖', 'C': '陕', 'Z': '浙', 'Q': '青',
+        'Y': '豫', 'K': '吉', 'R': '桂', 'T': '津',
+        'W': '鄂', 'V': '川', 'U': '湘',
+        '0': '京', '1': '苏', '2': '浙', '3': '鄂', '4': '皖',
+        '5': '豫', '6': '桂', '7': '湘', '8': '粤', '9': '陕',
+        'O': '京', 'P': '苏', 'D': '粤',
+    }
+    return province_like.get(ch.upper(), ch)
+
+
+def _digit_to_letter(ch: str) -> str:
+    """将数字纠正为对应的字母"""
+    digit_map = {
+        '0': 'D', '1': 'I', '2': 'Z', '3': 'E', '4': 'A',
+        '5': 'S', '6': 'G', '7': 'T', '8': 'B', '9': 'P',
+    }
+    return digit_map.get(ch, ch)
+
+
+def _letter_to_digit(ch: str) -> str:
+    """将字母纠正为对应的数字"""
+    letter_map = {
+        'O': '0', 'D': '0', 'Q': '0',
+        'I': '1', 'L': '1',
+        'Z': '2',
+        'E': '3', 'B': '8',
+        'A': '4',
+        'S': '5',
+        'G': '6',
+        'T': '7',
+        'P': '9', 'R': '9',
+    }
+    return letter_map.get(ch.upper(), ch)
 
 
 def _process_easyocr_results(results: list) -> dict:

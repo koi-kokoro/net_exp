@@ -19,7 +19,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from flask import (
-    Flask, render_template, request, jsonify, send_from_directory, session
+    Flask, render_template, request, jsonify, send_from_directory, session, Response
 )
 from werkzeug.utils import secure_filename
 
@@ -28,7 +28,7 @@ from config import (
 )
 from database import (
     init_db, register_entry, register_exit, get_occupied_spaces,
-    query_records, get_statistics,
+    query_records, get_statistics, get_connection,
 )
 from ocr_engine_new import recognize_plate, is_valid_plate, init_ocr_engine
 #from ocr_engine_lite import recognize_plate_lite, is_valid_plate_lite, init_ocr_engine_lite
@@ -168,6 +168,166 @@ def api_stats():
     return jsonify({
         'code': 200,
         'statistics': stats,
+    })
+
+
+# ==================== 管理员后台路由 ====================
+
+@app.route('/admin')
+def admin_panel():
+    """管理员后台页面"""
+    return render_template('admin.html')
+
+
+@app.route('/api/admin/config', methods=['GET', 'POST'])
+def admin_config():
+    """管理员：查看/修改计费配置"""
+    if request.method == 'GET':
+        # 从 config 模块和数据库读取当前配置
+        from config import (
+            DEFAULT_PRICE_PER_HOUR, DAILY_CAP, FREE_MINUTES,
+            NIGHT_DISCOUNT_START, NIGHT_DISCOUNT_END, NIGHT_DISCOUNT_RATE
+        )
+        return jsonify({
+            'code': 200,
+            'price_per_hour': DEFAULT_PRICE_PER_HOUR,
+            'daily_cap': DAILY_CAP,
+            'free_minutes': FREE_MINUTES,
+            'night_discount_start': NIGHT_DISCOUNT_START,
+            'night_discount_end': NIGHT_DISCOUNT_END,
+            'night_discount_rate': NIGHT_DISCOUNT_RATE,
+        })
+    else:
+        # 保存配置到数据库 fee_rules 表
+        data = request.get_json()
+        if not data:
+            return jsonify({'code': 400, 'msg': '数据为空'})
+        try:
+            conn = get_connection()
+            conn.execute("""
+                UPDATE fee_rules SET 
+                    price_per_hour=?, daily_cap=?, free_minutes=?
+                WHERE id=1
+            """, (
+                data.get('price_per_hour', 5.0),
+                data.get('daily_cap', 30.0),
+                data.get('free_minutes', 15),
+            ))
+            conn.commit()
+            conn.close()
+            log(f"计费配置已更新: {data}")
+            # 同时更新 config 模块变量（运行时生效）
+            import config
+            config.DEFAULT_PRICE_PER_HOUR = data.get('price_per_hour', 5.0)
+            config.DAILY_CAP = data.get('daily_cap', 30.0)
+            config.FREE_MINUTES = data.get('free_minutes', 15)
+            config.NIGHT_DISCOUNT_START = data.get('night_discount_start', 20)
+            config.NIGHT_DISCOUNT_END = data.get('night_discount_end', 8)
+            config.NIGHT_DISCOUNT_RATE = data.get('night_discount_rate', 0.8)
+            return jsonify({'code': 200, 'msg': '配置保存成功'})
+        except Exception as e:
+            return jsonify({'code': 500, 'msg': f'保存失败: {e}'})
+
+
+@app.route('/api/admin/export')
+def admin_export():
+    """管理员：导出停车记录为CSV"""
+    import csv
+    import io
+    
+    records = query_records()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['ID', '车牌号', '入场时间', '出场时间', '停车时长(分钟)', '费用(元)', '状态'])
+    
+    for r in records:
+        status_text = '在场' if r.get('status') == 'in' else '已离场'
+        writer.writerow([
+            r.get('id', ''),
+            r.get('plate_number', ''),
+            r.get('entry_time', ''),
+            r.get('exit_time', '') or '',
+            r.get('duration_minutes', '') or '',
+            r.get('fee', '') or '',
+            status_text,
+        ])
+    
+    output.seek(0)
+    return Response(
+        output.getvalue().encode('utf-8-sig'),
+        mimetype='text/csv',
+        headers={'Content-Disposition': 'attachment; filename=parking_records.csv'}
+    )
+
+
+@app.route('/api/admin/image-stats')
+def admin_image_stats():
+    """管理员：获取图片统计信息"""
+    import time as time_module
+    
+    images_dir = os.path.join(IMAGE_SAVE_DIR)
+    uploads_dir = os.path.join(IMAGE_SAVE_DIR, 'uploads')
+    
+    total_count = 0
+    total_size = 0
+    old_count = 0
+    old_size = 0
+    cutoff = time_module.time() - 7 * 24 * 3600  # 7天前
+    
+    for dir_path in [images_dir, uploads_dir]:
+        if not os.path.exists(dir_path):
+            continue
+        for fname in os.listdir(dir_path):
+            fpath = os.path.join(dir_path, fname)
+            if os.path.isfile(fpath) and fname.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.gif')):
+                size = os.path.getsize(fpath)
+                total_count += 1
+                total_size += size
+                if os.path.getmtime(fpath) < cutoff:
+                    old_count += 1
+                    old_size += size
+    
+    return jsonify({
+        'code': 200,
+        'total_count': total_count,
+        'total_size': total_size,
+        'old_count': old_count,
+        'old_size': old_size,
+    })
+
+
+@app.route('/api/admin/cleanup', methods=['POST'])
+def admin_cleanup():
+    """管理员：清理7天前的旧图片"""
+    import time as time_module
+    
+    images_dir = os.path.join(IMAGE_SAVE_DIR)
+    uploads_dir = os.path.join(IMAGE_SAVE_DIR, 'uploads')
+    cutoff = time_module.time() - 7 * 24 * 3600
+    deleted = 0
+    freed_bytes = 0
+    
+    for dir_path in [images_dir, uploads_dir]:
+        if not os.path.exists(dir_path):
+            continue
+        for fname in os.listdir(dir_path):
+            fpath = os.path.join(dir_path, fname)
+            if os.path.isfile(fpath) and fname.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.gif')):
+                if os.path.getmtime(fpath) < cutoff:
+                    try:
+                        size = os.path.getsize(fpath)
+                        os.remove(fpath)
+                        deleted += 1
+                        freed_bytes += size
+                    except Exception as e:
+                        log(f"清理图片失败: {fpath} - {e}")
+    
+    log(f"图片清理完成: 删除 {deleted} 张, 释放 {freed_bytes} 字节")
+    return jsonify({
+        'code': 200,
+        'msg': f'清理完成，删除 {deleted} 张图片',
+        'deleted': deleted,
+        'freed_bytes': freed_bytes,
     })
 
 
