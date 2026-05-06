@@ -37,6 +37,6 @@ IMAGE_SAVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "image
 os.makedirs(IMAGE_SAVE_DIR, exist_ok=True)
 
 # ==================== OCR配置 ====================
-# 置信度阈值（改进：提高阈值避免低质量识别结果）
-OCR_CONFIDENCE_HIGH = 0.5    # 高置信度：自动接受（提高到50%）
-OCR_CONFIDENCE_LOW = 0.15    # 低置信度：匹配车牌格式则接受(需确认)，否则拒绝（提高到15%）
+# 置信度阈值（EasyOCR 优化配置）
+OCR_CONFIDENCE_HIGH = 0.55   # 高置信度：自动接受（55%）
+OCR_CONFIDENCE_LOW = 0.3     # 低置信度：匹配车牌格式则接受(需确认)，否则拒绝（30%）

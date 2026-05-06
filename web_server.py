@@ -30,7 +30,8 @@ from database import (
     init_db, register_entry, register_exit, get_occupied_spaces,
     query_records, get_statistics,
 )
-from ocr_engine import recognize_plate, is_valid_plate, init_ocr_engine
+from ocr_engine_new import recognize_plate, is_valid_plate, init_ocr_engine
+#from ocr_engine_lite import recognize_plate_lite, is_valid_plate_lite, init_ocr_engine_lite
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24).hex()
